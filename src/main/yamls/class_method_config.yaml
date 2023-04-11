@@ -1,0 +1,16 @@
+jsoup:
+  nodes:
+    Node:
+      TOTAL_MUTATIONS:
+        MIN_MUTATIONS_PER_CLASS: 200
+      ENABLE_MUTATORS:
+        MATH: false
+        VOID_METHOD_CLASS: false
+      METHODS:
+        indent:
+          ENABLE_MUTATORS:
+            MATH: true
+        clearAttributes:
+          hasParent:
+            TOTAL_MUTATIONS: 0
+        

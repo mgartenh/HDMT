@@ -1,0 +1,85 @@
+CONDITIONAL_BOUNDARY:
+  # if less than, switch to less than or equal
+  if_icmplt: if_icmple
+  # if less than or equal, switch to less than
+  if_icmple: if_icmplt
+  # if less than 0, switch to less than or equal to 0
+  iflt: ifle
+  # if less than or equal to 0, switch to less than 0
+  ifle: iflt
+  # if greater than, switch to greater than or equal
+  if_icmpgt: if_icmpge
+  # if greater than or equal, switch to greater than
+  if_icmpge: if_icmpgt
+  # if greater than 0, switch to greater than or equal to 0
+  ifgt: ifge
+  # if greater than or equal to 0, switch to greater than 0
+  ifge: ifgt
+
+INCREMENTS:
+  # need to handle all increments and decrements
+  iinc: idec
+  idec: iinc
+
+# TBD
+INVERT_NEGS:
+  placeholder: blank
+
+MATH:
+  dadd: dsub
+  dsub: dadd
+  fadd: fsub
+  fsub: fadd
+  iadd: isub
+  isub: iadd
+  ladd: lsub
+  lsub: ladd
+  # need way to flag modulo operator
+
+  iand: ior
+  ior: iand
+  land: lor
+  lor: land
+  ixor: iand
+  lxor: land
+  ishl: ishr
+  ishr: ishl
+  lshl: lshr
+  lshr: lshl
+  lushr: lshl
+
+NEGATE_CONDITIONALS:
+  if_acmpeq: if_acmpne
+  if_acmpne: if_acmpeq
+  if_icmpeq: if_icmpne
+  if_icmpne: if_icmpeq
+  # if less than, switch to less than or equal
+  if_icmplt: if_icmpge
+  # if less than or equal, switch to less than
+  if_icmple: if_icmpgt
+  # if less than 0, switch to less than or equal to 0
+  iflt: ifge
+  # if less than or equal to 0, switch to less than 0
+  ifle: ifgt
+  # if greater than, switch to greater than or equal
+  if_icmpgt: if_icmple
+  # if greater than or equal, switch to greater than
+  if_icmpge: if_icmplt
+  # if greater than 0, switch to greater than or equal to 0
+  ifgt: ifle
+  # if greater than or equal to 0, switch to greater than 0
+  ifge: iflt
+
+RETURN_VALS:
+  TBD:TBD
+
+VOID_METHOD_CALLS:
+  TBD:TBD
+
+EMPTY_RETURNS:
+  TBD:TBD
+
+FALSE_RETURNS:
+  TBD:TBD
+
+TRUE_RETURNS:

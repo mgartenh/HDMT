@@ -75,8 +75,12 @@
 			<artifactId>snakeyaml</artifactId>
 			<version>2.0</version>
 		</dependency>
+		    <dependency>
+				<groupId>junit</groupId>
+				<artifactId>junit</artifactId>
+				<version>4.8.1</version>
+			</dependency>
 	</dependencies>
-
 
 	<!-- Checkstyle for code smells and static analysis -->
 	<reporting>

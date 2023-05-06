@@ -17,6 +17,7 @@ import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
 import org.objectweb.asm.Type;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import org.objectweb.asm.Opcodes;
@@ -27,8 +28,22 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Random;
 import java.util.ArrayList;
-import org.hdmt.InstructionData;
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.lang.ProcessBuilder;
+import java.io.File;
+import java.lang.InterruptedException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.concurrent.TimeUnit;
+import java.time.Instant;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.Callable;
 
+import org.hdmt.InstructionData;
 import org.hdmt.Config;
 
 public class Mutator {
@@ -43,7 +58,6 @@ public class Mutator {
         NEGATE_CONDITIONALS,
         RETURN_VALS,
         VOID_METHOD_CALLS,
-        EMPTY_RETURNS,
         FALSE_RETURNS,
         TRUE_RETURNS,
         NULL_RETURNS,
@@ -53,43 +67,198 @@ public class Mutator {
         NON_VOID_METHOD_CALLS,
         REMOVE_CONDITIONALS,
         REMOVE_INCREMENTS,
-        ABS,
         AOR,
         AOD,
-        CRCR,
         OBBN,
         ROR,
         UOI
     }
 
-    public Mutator(String classPath) throws IOException {
+    private String path;
+    private String name;
+    private String tempDir;
+    private String tempPath;
+    private MutationTypes mutation;
+
+    public Mutator(String classPath, String className) throws IOException, InterruptedException {
+
+        path = classPath;
+        name = className;
+
+        prepareTestEnv();
+    }
+
+    public Map<String, Map> mutationTest() throws IOException, FileNotFoundException, InterruptedException {
+
+        List<MethodNode> methods = loadClass().methods;
+
+        int totalMethods = methods.size();
+
+        Map<String, Map> classResults = new HashMap<>();
+
+        for (int i = 0; i < totalMethods; i++) {
+            String methodName = methods.get(i).name + "_" + methods.get(i).desc;
+
+            int totalMutations = 0; 
+            int totalFailures = 0;
+            Instant start = Instant.now();
+            Map<MutationTypes, Integer> mutationTypeCount = new HashMap<>();
+            Map<MutationTypes, Integer> mutationTypeFailureCount = new HashMap<>();
+
+            int totalInstructions = methods.get(i).instructions.size();
+            for (int k = 0; k < totalInstructions * 0.1 + 1; k++) {
+                ClassNode mutantClass = loadClass();
+                final MethodNode method = mutantClass.methods.get(i);
+                boolean mutationResult;
+                ExecutorService executor = Executors.newSingleThreadExecutor();
+                Future<Boolean> future = executor.submit(new Callable() {
+                    public Boolean call() throws Exception {
+                        return performMutation(method, 0);
+                    }
+                });
+                try {
+                    mutationResult = future.get(10, TimeUnit.SECONDS);
+                    future.cancel(true);
+                } catch (Exception e) {
+                    System.out.println(mutation.toString() + " : "+ e.toString());
+                    future.cancel(true);
+                    mutationResult = false;
+                }
+                if (mutationResult) {
+                    totalMutations++;
+                    if (mutationTypeCount.containsKey(mutation)) {
+                        mutationTypeCount.put(mutation, mutationTypeCount.get(mutation) + 1);
+                    } else {
+                        mutationTypeCount.put(mutation, 1);
+                        mutationTypeFailureCount.put(mutation, 0);
+                    }
+                    
+                    ClassWriter cw = new ClassWriter(0);
+                    mutantClass.accept(cw);
+                    new File(path).delete();
+                    FileOutputStream out = new FileOutputStream(path);
+                    out.write(cw.toByteArray());
+                    executor = Executors.newSingleThreadExecutor();
+                    future = executor.submit(new Callable() {
+                        public Boolean call() throws Exception {
+                            return runTests(name + "Test");
+                        }
+                    });
+                    boolean testResult, failure;
+                    try {
+                        testResult = future.get(10, TimeUnit.SECONDS);
+                        future.cancel(true);
+                        failure = false;
+                    } catch (Exception e) {
+                        System.out.println(mutation.toString() + " : "+ e.toString());
+                        future.cancel(true);
+                        failure = true;
+                        testResult = false;
+                    }
+                    if (testResult) {
+                        System.out.println(name + " " + methodName + " mutation of type " + mutation.toString() + " caused tests to pass");
+                    } else if (!failure) {
+                        System.out.println(name + " " + methodName + " mutation of type " + mutation.toString() + " caused tests to fail");
+                        totalFailures++;
+                        mutationTypeFailureCount.put(mutation, mutationTypeFailureCount.get(mutation) + 1);
+                    }
+                }
+
+            }
 
 
-        FileInputStream in = new FileInputStream(classPath);
+            Instant end = Instant.now();
 
-        ClassReader cr = new ClassReader(in);
+            Map<String, Map> methodResults = new HashMap<>();
 
-        ClassNode v = new ClassNode(Opcodes.ASM9);
+            Map<String, Integer> aggregates = new HashMap<>();
 
-        cr.accept(v, ClassReader.SKIP_DEBUG);
+            aggregates.put("totalMutations", totalMutations);
+            aggregates.put("totalFailures", totalFailures);
+            aggregates.put("totalTime", (int)((end.getEpochSecond() - start.getEpochSecond()) * 1000 + (end.getNano() - start.getNano()) / 1000000));
 
-        List<MethodNode> methodList = v.methods;
 
-        for (MethodNode method: methodList) {
-            performMutation(method);
-        }      
+            methodResults.put("mutationTypeCount", mutationTypeCount);
+            methodResults.put("mutationTypeFailureCount", mutationTypeFailureCount);
+            methodResults.put("aggregates", aggregates);
+            classResults.put(methodName, methodResults);
 
-        ClassWriter cw = new ClassWriter(0); //ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);
+        }
 
-        v.accept(cw);
+        new File(path).delete();
+        Files.move(Paths.get(tempPath), Paths.get(path));
+        // System.out.println(runTests("ALL"));
 
-        FileOutputStream out = new FileOutputStream("test.class");
-
-        out.write(cw.toByteArray());
-
-        in.close();
+        return classResults;
 
     }
+
+    private void prepareTestEnv() throws IOException {
+        tempDir = System.getProperty("user.dir") + "/temp/";
+        tempPath = tempDir + name + ".class";
+        new File(tempDir).mkdirs();
+        new File(tempPath).delete();
+        Files.move(Paths.get(path), Paths.get(tempPath));
+    }
+
+    private ClassNode loadClass() throws IOException, FileNotFoundException {
+        FileInputStream in = new FileInputStream(tempPath);
+        ClassReader cr = new ClassReader(in);
+        ClassNode v = new ClassNode(Opcodes.ASM9);
+        cr.accept(v, ClassReader.SKIP_DEBUG);
+
+        return v;
+    }
+
+
+    private static boolean runTest(String testClassName) throws IOException, InterruptedException {
+        String additionalParam;
+        if (testClassName.equals("ALL")) {
+            additionalParam = "";
+        } else {
+            additionalParam = " -Dtest=" + testClassName + " -DfailIfNoTests=false";
+        }
+        ProcessBuilder builder = new ProcessBuilder();
+        builder.command("sh", "-c", "mvn surefire:test" + additionalParam);
+        builder.directory(new File("/Users/mgartenhaus/CS527/jsoup_eval/"));
+        Process pr = builder.start();
+        InputStream stdout = pr.getInputStream();
+        BufferedReader reader = new BufferedReader (new InputStreamReader(stdout));
+        pr.waitFor(100, TimeUnit.MILLISECONDS);
+
+        boolean result = true;
+
+        String line = reader.readLine();
+        while (line != null && ! line.trim().equals("--EOF--")) {
+            // System.out.println ("Stdout: " + line);
+            if (line.contains("BUILD FAILURE")) {
+                result = false;
+                break;
+            } else if (line.contains("BUILD SUCCESS")) {
+                result = true;
+                break;
+            }
+            line = reader.readLine();
+        }
+
+        pr.destroyForcibly();
+
+        return result;
+    }
+
+    public static boolean runTests(String testClassName) throws IOException, InterruptedException {
+        boolean result = true;
+        if (!testClassName.equals("ALL")) {
+            result = runTest(testClassName);
+        }
+        if (result) {
+            result = runTest("ALL");
+        }
+
+        return result;
+
+    }
+    
 
     private static List<String> getOpcodes(InsnList instructions) {
 
@@ -186,7 +355,7 @@ public class Mutator {
                 data.allowedMutations.add(MutationTypes.AOD);
             }
             data.allowedMutations.add(MutationTypes.RETURN_VALS);
-            data.allowedMutations.add(MutationTypes.EMPTY_RETURNS);
+            // data.allowedMutations.add(MutationTypes.EMPTY_RETURNS);
             if (data.opcodeString.equals("ireturn") && Type.getReturnType(method.desc).equals(Type.BOOLEAN_TYPE)) {
                 data.allowedMutations.add(MutationTypes.FALSE_RETURNS);
                 data.allowedMutations.add(MutationTypes.TRUE_RETURNS);
@@ -198,10 +367,10 @@ public class Mutator {
 
             data.allowedMutations.add(MutationTypes.NULL_RETURNS);
              
-            if (data.opcodeString.contains("const_")) {
+            if (data.opcodeString.contains("const_") && !data.opcodeString.equals("aconst_null")) {
                 data.allowedMutations.add(MutationTypes.INLINE_CONSTS);
             }
-            data.allowedMutations.add(MutationTypes.CRCR);
+            // data.allowedMutations.add(MutationTypes.CRCR);
             if (data.opcodeString.equals("iand") || data.opcodeString.equals("ior") || data.opcodeString.equals("land") || data.opcodeString.equals("lor")) {
                 data.allowedMutations.add(MutationTypes.OBBN);
             } 
@@ -230,7 +399,11 @@ public class Mutator {
                 //VarInsnNode -> local variable instruction - we can change, works!
     }
 
-    private static void performMutation(MethodNode method) {
+    private boolean performMutation(MethodNode method, int recursionCount) {
+        if (recursionCount > 10) {
+            System.out.println("unable to find mutation");
+            return false;
+        }
         InsnList instructions = method.instructions;
 
         List<InstructionData> instructionData = processInstructions(instructions, method);
@@ -242,9 +415,9 @@ public class Mutator {
 
         int candidateIndex = rand.nextInt(candidateMutations.size());
 
-        MutationTypes candidate = MutationTypes.CONDITIONALS_BOUNDARY; //candidateMutations.remove(candidateIndex);
+        mutation = candidateMutations.get(candidateIndex);
         List<Integer> validIndexes = new ArrayList<>();
-        switch (candidate) {
+        switch (mutation) {
             case CONDITIONALS_BOUNDARY:
 
                 for (int i = 0; i < instructionData.size(); i++) {
@@ -260,15 +433,17 @@ public class Mutator {
 
                     String prev = mutateData.opcodeString;
                     String mut = Config.CONDITIONALS_BOUNDARY_MUTATION.get(prev);
-                    System.out.printf("%s-%s\n", prev, mut);
+                    // System.out.printf("%s-%s\n", prev, mut);
                     int opcode = getOpcodeInt(mut);
 
                     ((JumpInsnNode) instructions.get(instructionLoc)).setOpcode(opcode);
 
+                    return true;
+
                 } else {
+                    return performMutation(method, ++recursionCount);
                 }
 
-                break;
             case INCREMENTS: //IincInsnNode: node.incr = node.incr * -1
 
                 for (int i = 0; i < instructionData.size(); i++) {
@@ -282,8 +457,12 @@ public class Mutator {
                     int instructionLoc = validIndexes.get(rand.nextInt(validIndexes.size()));
 
                     ((IincInsnNode) instructions.get(instructionLoc)).incr *=-1;
+                    
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
                 }
-                break;
+                
             case MATH:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -301,10 +480,10 @@ public class Mutator {
                     int opcode = getOpcodeInt(mut);
 
                     instructions.set(instructions.get(instructionLoc), new InsnNode(opcode));
+                    return true;
                 } else {
+                    return performMutation(method, ++recursionCount);
                 }
-
-                break;
                 
             case NEGATE_CONDITIONALS:
                 for (int i = 0; i < instructionData.size(); i++) {
@@ -320,15 +499,16 @@ public class Mutator {
 
                     String prev = mutateData.opcodeString;
                     String mut = Config.NEGATE_CONDITIONALS.get(prev);
-                    System.out.printf("%s-%s\n", prev, mut);
+                    // System.out.printf("%s-%s\n", prev, mut);
                     int opcode = getOpcodeInt(mut);
 
                     ((JumpInsnNode) instructions.get(instructionLoc)).setOpcode(opcode);
 
-                    System.out.printf("%d-%d\n", mutateData.opcode, instructions.get(instructionLoc).getOpcode());
+                    // System.out.printf("%d-%d\n", mutateData.opcode, instructions.get(instructionLoc).getOpcode());
+                    return true;
                 } else {
+                    return performMutation(method, ++recursionCount);
                 }
-                break;
             case VOID_METHOD_CALLS:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -341,9 +521,10 @@ public class Mutator {
                     int instructionLoc = validIndexes.get(0); //rand.nextInt(validIndexes.size()));
 
                     instructions.remove(instructions.get(instructionLoc));
+                    return true;
                 } else {
+                    return performMutation(method, ++recursionCount);
                 }
-                break;
             case REMOVE_INCREMENTS:    
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -356,8 +537,10 @@ public class Mutator {
                     int instructionLoc = validIndexes.get(rand.nextInt(validIndexes.size()));
 
                     ((IincInsnNode) instructions.get(instructionLoc)).incr = 0;
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
                 }
-                break;
         
             case FALSE_RETURNS:
                 for (int i = 0; i < instructionData.size(); i++) {
@@ -370,8 +553,10 @@ public class Mutator {
                     int instructionLoc = validIndexes.get(rand.nextInt(validIndexes.size()));
 
                     instructions.insertBefore(instructions.get(instructionLoc), new InsnNode(getOpcodeInt("iconst_0")));
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
                 }
-                break;
             case TRUE_RETURNS:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -383,8 +568,10 @@ public class Mutator {
                     int instructionLoc = validIndexes.get(rand.nextInt(validIndexes.size()));
 
                     instructions.insertBefore(instructions.get(instructionLoc), new InsnNode(getOpcodeInt("iconst_1")));
-                }        
-                break;
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
+                }
             case REMOVE_CONDITIONALS:
                 
                 for (int i = 0; i < instructionData.size(); i++) {
@@ -402,8 +589,10 @@ public class Mutator {
                     int opcode = getOpcodeInt(mut);
                     ((JumpInsnNode) instructions.get(instructionLoc)).setOpcode(opcode);
 
-                }        
-                break;
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
+                }
             case NULL_RETURNS:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -415,8 +604,10 @@ public class Mutator {
                     int instructionLoc = validIndexes.get(rand.nextInt(validIndexes.size()));
 
                     instructions.insertBefore(instructions.get(instructionLoc), new InsnNode(getOpcodeInt("aconst_null")));
-                }        
-                break;
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
+                }
             case CONSTRUCTOR_CALLS:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -428,8 +619,10 @@ public class Mutator {
                     int instructionLoc = validIndexes.get(rand.nextInt(validIndexes.size()));
 
                     instructions.set(instructions.get(instructionLoc), new InsnNode(getOpcodeInt("aconst_null")));
-                }        
-                break;
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
+                }
             case OBBN:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -456,8 +649,10 @@ public class Mutator {
                         instructions.remove(instructions.get(instructionLoc));
                         instructions.remove(instructions.get(instructionLoc -1));
                     }
-                }        
-                break;
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
+                }
             case AOD:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -476,8 +671,10 @@ public class Mutator {
                         instructions.remove(instructions.get(instructionLoc));
                         instructions.remove(instructions.get(instructionLoc -1));
                     }
-                }        
-                break;
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
+                }
             case ROR:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -528,10 +725,10 @@ public class Mutator {
 
                     ((JumpInsnNode) instructions.get(instructionLoc)).setOpcode(getOpcodeInt((opcodeString)));
 
+                    return true;
                 } else {
+                    return performMutation(method, ++recursionCount);
                 }
-
-                break;
 
             case AOR:
                 for (int i = 0; i < instructionData.size(); i++) {
@@ -575,12 +772,13 @@ public class Mutator {
                     }
                     InstructionData mutateData = instructionData.get(instructionLoc);
 
-                    ((JumpInsnNode) instructions.get(instructionLoc)).setOpcode(getOpcodeInt((opcodeString)));
+                    instructions.set(instructions.get(instructionLoc), new InsnNode(getOpcodeInt(opcodeString)));
 
+                    return true;
                 } else {
+                    return performMutation(method, ++recursionCount);
                 }
 
-                break;
             case PRIMITIVE_RETURNS:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -604,8 +802,10 @@ public class Mutator {
                     }
 
                     instructions.insertBefore(instructions.get(instructionLoc), new InsnNode(getOpcodeInt(primVal)));
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
                 }
-                break;
 
             case NON_VOID_METHOD_CALLS:
                 for (int i = 0; i < instructionData.size(); i++) {
@@ -633,8 +833,10 @@ public class Mutator {
                     }
 
                     instructions.insertBefore(instructions.get(instructionLoc), new InsnNode(getOpcodeInt(returnValue)));
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
                 }
-                break;
             case INVERT_NEGS:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -646,9 +848,10 @@ public class Mutator {
                     int instructionLoc = validIndexes.get(rand.nextInt(validIndexes.size()));
                     instructions.remove(instructions.get(instructionLoc));
 
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
                 }
-                break;
-            
             case INLINE_CONSTS:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
@@ -683,17 +886,20 @@ public class Mutator {
                         muteString ="dconst_1";
                     } else if (opcodeString.equals("dconst_1")) {
                         muteString = "dconst_0";
+                    } else {
+                        // System.out.println("THERE IS NO MUTE STRING FOR: " + muteString);
                     }
+                    
 
                     instructions.set(instructions.get(instructionLoc), new InsnNode(getOpcodeInt(muteString)));
+                    return true;
                 } else {
-
+                    return performMutation(method, ++recursionCount);
                 }
-                break;
             case UOI:
                 for (int i = 0; i < instructionData.size(); i++) {
                     InstructionData instruction = instructionData.get(i);
-                    if (instruction.allowedMutations.contains(MutationTypes.INLINE_CONSTS)) {
+                    if (instruction.allowedMutations.contains(MutationTypes.UOI)) {
                         validIndexes.add(i);
                     }
                 }
@@ -717,17 +923,18 @@ public class Mutator {
                         // i--
                         instructions.insertBefore(instructions.get(instructionLoc), new IincInsnNode(-1, variable));
                     }
-                } else {}
-
-                break;
+                    return true;
+                } else {
+                    return performMutation(method, ++recursionCount);
+                }
 
                 // EMPTY_RETURNS, -- change method return to appropriate null value
                 // ABS, -- negate value
                 // CRCR, -- other inline const mutator
             
-            }
+        }
 
-
+        return false;
 
     }  
 }
